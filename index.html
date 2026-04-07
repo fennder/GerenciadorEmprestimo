@@ -25,12 +25,20 @@
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
                 <div>
                     <h1 class="text-3xl font-black text-slate-800 tracking-tight">CrediManager <span class="text-indigo-600">Calc</span></h1>
-                    <p class="text-slate-500 font-medium">Calcule juros e parcele o recebimento</p>
-                    <p id="user-status" class="text-[10px] text-slate-400 font-mono mt-1 uppercase tracking-widest"></p>
+                    <p class="text-slate-500 font-medium">Gestão de juros e parcelamento na nuvem</p>
+                    <div class="flex items-center gap-2 mt-2">
+                        <span class="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-bold uppercase tracking-widest">Sua Chave de Acesso:</span>
+                        <code id="user-status" class="text-[10px] text-indigo-600 font-black cursor-pointer hover:underline" title="Clique para copiar">Carregando...</code>
+                    </div>
                 </div>
-                <button onclick="window.openModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all hover:-translate-y-1">
-                    <i data-lucide="calculator" class="w-5 h-5"></i> Novo Cálculo
-                </button>
+                <div class="flex gap-2">
+                    <button onclick="window.promptRestore()" class="bg-white border border-slate-200 text-slate-600 px-4 py-3 rounded-2xl font-bold shadow-sm flex items-center gap-2 transition-all hover:bg-slate-50">
+                        <i data-lucide="refresh-cw" class="w-4 h-4"></i> Restaurar
+                    </button>
+                    <button onclick="window.openModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all hover:-translate-y-1">
+                        <i data-lucide="plus" class="w-5 h-5"></i> Novo Cálculo
+                    </button>
+                </div>
             </div>
 
             <!-- Estatísticas do Painel -->
@@ -195,27 +203,60 @@
         // Gestão de Autenticação (Regra 3)
         async function initAuth() {
             try {
+                // Tenta recuperar token salvo para manter a mesma sessão
+                const savedToken = localStorage.getItem('credi_manager_token');
+                
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
+                } else if (savedToken) {
+                    // Aqui simulamos uma restauração simples. No Firestore real usaríamos 
+                    // signInWithCustomToken se tivéssemos o token, mas aqui usamos o anonimato
+                    // O UID persistirá no navegador enquanto o IndexedDB/LocalStorage estiver ativo.
+                    await signInAnonymously(auth);
                 } else {
                     await signInAnonymously(auth);
                 }
             } catch (e) { 
-                console.error("Auth Failure:", e); 
+                console.error("Erro na Autenticação:", e); 
             }
         }
 
         onAuthStateChanged(auth, (user) => {
             currentUser = user;
             if (user) {
-                document.getElementById('user-status').innerText = `ID: ${user.uid.substring(0,8)}...`;
+                document.getElementById('user-status').innerText = user.uid;
                 loadLoans();
             } else {
                 if (unsubscribeLoans) unsubscribeLoans();
             }
         });
 
-        // Cálculos Financeiros
+        // --- Funções Auxiliares ---
+
+        window.promptRestore = () => {
+            const code = prompt("Introduza a sua Chave de Acesso para restaurar os dados:");
+            if (code && code.length > 20) {
+                alert("Aviso: A restauração entre dispositivos via UID requer autenticação completa. No modo demonstração, a sua chave é o identificador único da sessão atual.");
+            }
+        };
+
+        document.getElementById('user-status').onclick = () => {
+            const el = document.getElementById('user-status');
+            const text = el.innerText;
+            const temp = document.createElement('input');
+            document.body.appendChild(temp);
+            temp.value = text;
+            temp.select();
+            document.execCommand('copy');
+            document.body.removeChild(temp);
+            
+            const original = text;
+            el.innerText = "COPIADO!";
+            setTimeout(() => el.innerText = original, 2000);
+        };
+
+        // --- Lógica de Negócio ---
+
         function updateSimulation() {
             const p = parseFloat(document.getElementById('principal').value) || 0;
             const r = (parseFloat(document.getElementById('interest-rate').value) || 0) / 100;
@@ -238,8 +279,6 @@
             document.getElementById('summary-borrower').innerText = document.getElementById('borrower').value || '--';
         }
 
-        // --- Funções Globais expostas para o Window ---
-
         window.saveLoan = async () => {
             if (!currentUser) return;
             
@@ -251,7 +290,7 @@
             if (!borrower || !firstDate || !document.getElementById('principal').value) return;
 
             btn.disabled = true;
-            btn.innerText = "Salvando...";
+            btn.innerText = "Sincronizando...";
 
             const installmentsList = [];
             for (let i = 0; i < numInst; i++) {
@@ -266,7 +305,6 @@
             }
 
             try {
-                // Caminho obrigatório Regra 1
                 const path = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
                 await addDoc(path, {
                     borrower,
@@ -279,7 +317,7 @@
                 });
                 window.closeModal();
             } catch (e) {
-                console.error("Firestore Save Error:", e);
+                console.error("Erro ao salvar:", e);
             } finally {
                 btn.disabled = false;
                 btn.innerText = "Confirmar e Salvar";
@@ -289,7 +327,6 @@
         window.markPaid = async (loanId, idx) => {
             if (!currentUser) return;
             const ref = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', loanId);
-            
             try {
                 const snap = await getDoc(ref);
                 if (snap.exists()) {
@@ -298,14 +335,14 @@
                     list[idx].paid = !list[idx].paid;
                     await updateDoc(ref, { installmentsList: list });
                 }
-            } catch (e) { console.error("Update Error:", e); }
+            } catch (e) { console.error("Erro de atualização:", e); }
         };
 
         window.deleteLoan = async (id) => {
-            if (!currentUser || !confirm("Deseja apagar este registro permanentemente?")) return;
+            if (!currentUser || !confirm("Deseja apagar este registro permanentemente da nuvem?")) return;
             try {
                 await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', id));
-            } catch (e) { console.error("Delete Error:", e); }
+            } catch (e) { console.error("Erro ao eliminar:", e); }
         };
 
         window.toggleExpand = (id) => {
@@ -342,16 +379,12 @@
 
         function loadLoans() {
             if (!currentUser) return;
-            // Regra 1: Caminho específico
             const path = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
-            
-            // Regra 2: Simples onSnapshot (ordenação em memória)
             unsubscribeLoans = onSnapshot(path, (snap) => {
                 const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                // Ordenar por data de criação (JS memory)
                 data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
                 render(data);
-            }, (err) => console.error("Snapshot error:", err));
+            }, (err) => console.error("Erro no Snapshot:", err));
         }
 
         function render(loans) {
@@ -361,8 +394,8 @@
             if (loans.length === 0) {
                 list.innerHTML = `
                     <div class="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
-                        <i data-lucide="calculator" class="mx-auto text-slate-200 mb-4" size="60"></i>
-                        <p class="text-slate-400 font-bold uppercase text-[10px] tracking-widest">Sem registos locais</p>
+                        <i data-lucide="cloud-off" class="mx-auto text-slate-200 mb-4" size="60"></i>
+                        <p class="text-slate-400 font-bold uppercase text-[10px] tracking-widest">Sem dados na nuvem</p>
                     </div>`;
             } else {
                 list.innerHTML = '';
@@ -409,7 +442,7 @@
                             `).join('')}
                             <div class="mt-4 pt-4 border-t border-slate-200 flex justify-end">
                                 <button onclick="window.deleteLoan('${loan.id}')" class="text-rose-500 text-[10px] font-black uppercase flex items-center gap-1 hover:text-rose-700">
-                                    <i data-lucide="trash-2" class="w-3 h-3"></i> Apagar Empréstimo
+                                    <i data-lucide="trash-2" class="w-3 h-3"></i> Apagar Registro
                                 </button>
                             </div>
                         </div>`;
