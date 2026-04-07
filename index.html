@@ -1,409 +1,430 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { initializeApp } from 'firebase/app';
-import { 
-  getAuth, 
-  onAuthStateChanged, 
-  signInAnonymously, 
-  signInWithCustomToken 
-} from 'firebase/auth';
-import { 
-  getFirestore, 
-  collection, 
-  doc, 
-  addDoc, 
-  updateDoc, 
-  deleteDoc, 
-  onSnapshot 
-} from 'firebase/firestore';
-import { 
-  Plus, 
-  Trash2, 
-  DollarSign, 
-  Percent, 
-  CheckCircle2, 
-  Clock, 
-  Calendar,
-  Calculator,
-  ArrowRight,
-  ChevronDown,
-  ChevronUp,
-  User,
-  Loader2,
-  AlertCircle
-} from 'lucide-react';
-
-// --- Configuração Firebase ---
-const firebaseConfig = JSON.parse(__firebase_config);
-const app = initializeApp(firebaseConfig);
-const auth = getAuth(app);
-const db = getFirestore(app);
-const appId = typeof __app_id !== 'undefined' ? __app_id : 'loan-manager-calculator';
-
-const App = () => {
-  const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [loans, setLoans] = useState([]);
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [expandedLoan, setExpandedLoan] = useState(null);
-  
-  // Estados do Formulário/Calculadora
-  const [step, setStep] = useState(1); // 1: Cálculo, 2: Parcelamento
-  const [formData, setFormData] = useState({
-    borrower: '',
-    principal: '',
-    interestRate: '',
-    interestType: 'compound', // simple/compound
-    penaltyRate: '',
-    months: '1',
-    installments: '1',
-    firstDueDate: '',
-    description: ''
-  });
-
-  useEffect(() => {
-    const initAuth = async () => {
-      try {
-        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-          await signInWithCustomToken(auth, __initial_auth_token);
-        } else {
-          await signInAnonymously(auth);
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CrediManager Pro - Calculadora e Parcelamento</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800;900&display=swap');
+        body { font-family: 'Inter', sans-serif; }
+        .modal-animate { animation: fadeIn 0.3s ease-out; }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: scale(0.95); }
+            to { opacity: 1; transform: scale(1); }
         }
-      } catch (e) { console.error(e); }
-    };
-    initAuth();
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
-      setUser(u);
-      setLoading(false);
-    });
-    return () => unsubscribe();
-  }, []);
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
 
-  useEffect(() => {
-    if (!user) return;
-    const loansCol = collection(db, 'artifacts', appId, 'users', user.uid, 'loans');
-    const unsubscribe = onSnapshot(loansCol, (snapshot) => {
-      setLoans(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
-    }, (err) => console.error(err));
-    return () => unsubscribe();
-  }, [user]);
-
-  // --- Lógica de Cálculo de Simulação ---
-  const simulation = useMemo(() => {
-    const p = parseFloat(formData.principal) || 0;
-    const r = (parseFloat(formData.interestRate) || 0) / 100;
-    const t = parseFloat(formData.months) || 1;
-    
-    let totalWithInterest = 0;
-    if (formData.interestType === 'simple') {
-      totalWithInterest = p * (1 + r * t);
-    } else {
-      totalWithInterest = p * Math.pow(1 + r, t);
-    }
-
-    const installmentValue = totalWithInterest / (parseInt(formData.installments) || 1);
-
-    return {
-      totalWithInterest,
-      interestAmount: totalWithInterest - p,
-      installmentValue
-    };
-  }, [formData.principal, formData.interestRate, formData.interestType, formData.months, formData.installments]);
-
-  const handleAddLoan = async (e) => {
-    e.preventDefault();
-    if (!user) return;
-
-    const numInstallments = parseInt(formData.installments);
-    const valuePerInstallment = simulation.installmentValue;
-    const generatedInstallments = [];
-
-    for (let i = 0; i < numInstallments; i++) {
-      const date = new Date(formData.firstDueDate);
-      date.setMonth(date.getMonth() + i);
-      generatedInstallments.push({
-        number: i + 1,
-        dueDate: date.toISOString(),
-        amount: valuePerInstallment,
-        paid: false,
-        paymentDate: null
-      });
-    }
-
-    try {
-      const loansCol = collection(db, 'artifacts', appId, 'users', user.uid, 'loans');
-      await addDoc(loansCol, {
-        borrower: formData.borrower,
-        principal: parseFloat(formData.principal),
-        totalToPay: simulation.totalWithInterest,
-        interestRate: formData.interestRate,
-        interestType: formData.interestType,
-        penaltyRate: formData.penaltyRate,
-        installmentsList: generatedInstallments,
-        createdAt: new Date().toISOString(),
-        description: formData.description
-      });
-      setIsModalOpen(false);
-      setStep(1);
-      setFormData({ borrower: '', principal: '', interestRate: '', interestType: 'compound', penaltyRate: '', months: '1', installments: '1', firstDueDate: '', description: '' });
-    } catch (err) { console.error(err); }
-  };
-
-  const toggleInstallmentPaid = async (loanId, instIndex) => {
-    if (!user) return;
-    const loan = loans.find(l => l.id === loanId);
-    const newList = [...loan.installmentsList];
-    const isPaid = !newList[instIndex].paid;
-    
-    newList[instIndex] = {
-      ...newList[instIndex],
-      paid: isPaid,
-      paymentDate: isPaid ? new Date().toISOString() : null
-    };
-
-    const loanDoc = doc(db, 'artifacts', appId, 'users', user.uid, 'loans', loanId);
-    await updateDoc(loanDoc, { installmentsList: newList });
-  };
-
-  const deleteLoan = async (id) => {
-    if (!user) return;
-    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'loans', id));
-  };
-
-  if (loading) return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <Loader2 className="animate-spin text-indigo-600" size={40} />
-    </div>
-  );
-
-  return (
-    <div className="min-h-screen bg-slate-50 text-slate-900 p-4 md:p-8 font-sans">
-      <div className="max-w-4xl mx-auto">
-        
-        {/* Header */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
-          <div>
-            <h1 className="text-3xl font-black text-slate-800 tracking-tight">CrediManager <span className="text-indigo-600">Calc</span></h1>
-            <p className="text-slate-500 font-medium">Calcule juros e parcele o recebimento</p>
-          </div>
-          <button 
-            onClick={() => { setIsModalOpen(true); setStep(1); }}
-            className="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all hover:-translate-y-1"
-          >
-            <Calculator size={20} /> Novo Cálculo
-          </button>
-        </div>
-
-        {/* Dashboard Stats */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
-          <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-            <p className="text-xs font-bold text-slate-400 uppercase mb-1">Total Ativo</p>
-            <p className="text-xl font-black text-slate-800">
-              R$ {loans.reduce((acc, l) => acc + (l.installmentsList.filter(i => !i.paid).reduce((s, i) => s + i.amount, 0)), 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
-            </p>
-          </div>
-          <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-            <p className="text-xs font-bold text-slate-400 uppercase mb-1">Total Recebido</p>
-            <p className="text-xl font-black text-emerald-600">
-              R$ {loans.reduce((acc, l) => acc + (l.installmentsList.filter(i => i.paid).reduce((s, i) => s + i.amount, 0)), 0).toLocaleString('pt-BR', {minimumFractionDigits: 2})}
-            </p>
-          </div>
-          <div className="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
-            <p className="text-xs font-bold text-slate-400 uppercase mb-1">Empréstimos</p>
-            <p className="text-xl font-black text-indigo-600">{loans.length}</p>
-          </div>
-        </div>
-
-        {/* Loan List */}
-        <div className="space-y-4">
-          {loans.length === 0 ? (
-            <div className="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
-              <Calculator className="mx-auto text-slate-200 mb-4" size={60} />
-              <p className="text-slate-500 font-medium">Faça seu primeiro cálculo para começar.</p>
-            </div>
-          ) : (
-            loans.map((loan) => {
-              const paidCount = loan.installmentsList.filter(i => i.paid).length;
-              const isFullyPaid = paidCount === loan.installmentsList.length;
-              
-              return (
-                <div key={loan.id} className={`bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden transition-all ${isFullyPaid ? 'opacity-70' : ''}`}>
-                  <div 
-                    className="p-6 cursor-pointer hover:bg-slate-50/50 flex justify-between items-center"
-                    onClick={() => setExpandedLoan(expandedLoan === loan.id ? null : loan.id)}
-                  >
-                    <div>
-                      <div className="flex items-center gap-3 mb-1">
-                        <h3 className="text-lg font-bold text-slate-800">{loan.borrower}</h3>
-                        {isFullyPaid && <span className="bg-emerald-100 text-emerald-700 text-[10px] font-black px-2 py-1 rounded">PAGO</span>}
-                      </div>
-                      <div className="flex gap-4 text-xs font-bold text-slate-400 uppercase tracking-tighter">
-                        <span>Capital: R$ {loan.principal.toLocaleString('pt-BR')}</span>
-                        <span className="text-indigo-500">Total: R$ {loan.totalToPay.toLocaleString('pt-BR')}</span>
-                        <span>{loan.installmentsList.length}x</span>
-                      </div>
-                    </div>
-                    <div className="text-right">
-                      <p className="text-sm font-black text-slate-700">{paidCount}/{loan.installmentsList.length} Parcelas</p>
-                      {expandedLoan === loan.id ? <ChevronUp className="inline text-slate-400"/> : <ChevronDown className="inline text-slate-400"/>}
-                    </div>
-                  </div>
-
-                  {expandedLoan === loan.id && (
-                    <div className="p-6 bg-slate-50/50 border-t border-slate-50">
-                      <div className="grid gap-2">
-                        {loan.installmentsList.map((inst, idx) => (
-                          <div key={idx} className={`flex items-center justify-between p-3 rounded-xl border ${inst.paid ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-200'}`}>
-                            <div className="flex items-center gap-4">
-                              <span className="text-[10px] font-black text-slate-400 w-4">{inst.number}</span>
-                              <div>
-                                <p className="text-sm font-bold">R$ {inst.amount.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</p>
-                                <p className="text-[10px] font-bold text-slate-400">Vence {new Date(inst.dueDate).toLocaleDateString('pt-BR')}</p>
-                              </div>
-                            </div>
-                            <button 
-                              onClick={() => toggleInstallmentPaid(loan.id, idx)}
-                              className={`p-2 rounded-lg ${inst.paid ? 'text-emerald-600 bg-emerald-100' : 'text-slate-300 hover:text-indigo-600 transition-colors'}`}
-                            >
-                              <CheckCircle2 size={20} />
-                            </button>
-                          </div>
-                        ))}
-                      </div>
-                      <div className="mt-4 pt-4 border-t border-slate-200 flex justify-end">
-                         <button onClick={() => deleteLoan(loan.id)} className="text-rose-500 text-xs font-bold flex items-center gap-1 hover:underline">
-                           <Trash2 size={14}/> Excluir Registro
-                         </button>
-                      </div>
-                    </div>
-                  )}
+    <div id="app" class="min-h-screen p-4 md:p-8">
+        <div class="max-w-4xl mx-auto">
+            
+            <!-- Header -->
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+                <div>
+                    <h1 class="text-3xl font-black text-slate-800 tracking-tight">CrediManager <span class="text-indigo-600">Calc</span></h1>
+                    <p class="text-slate-500 font-medium">Calcule juros e parcele o recebimento</p>
                 </div>
-              );
-            })
-          )}
-        </div>
-
-        {/* Multi-Step Modal */}
-        {isModalOpen && (
-          <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-[2.5rem] w-full max-w-lg shadow-2xl overflow-hidden border border-white/20">
-              
-              {/* Modal Header */}
-              <div className="p-6 bg-indigo-600 text-white flex justify-between items-center">
-                <div className="flex items-center gap-3">
-                  <div className="bg-white/20 p-2 rounded-xl">
-                    <Calculator size={20} />
-                  </div>
-                  <div>
-                    <h2 className="font-bold leading-none">Novo Empréstimo</h2>
-                    <p className="text-[10px] font-bold opacity-70 uppercase tracking-widest mt-1">Passo {step} de 2</p>
-                  </div>
-                </div>
-                <button onClick={() => setIsModalOpen(false)} className="bg-black/10 p-2 rounded-full hover:bg-black/20 transition-colors">
-                  <Plus className="rotate-45" size={20}/>
+                <button onclick="window.openModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all hover:-translate-y-1">
+                    <i data-lucide="calculator" class="w-5 h-5"></i> Novo Cálculo
                 </button>
-              </div>
-
-              <form onSubmit={handleAddLoan} className="p-8 space-y-6">
-                
-                {step === 1 ? (
-                  <div className="space-y-5 animate-in slide-in-from-right-4 duration-300">
-                    <div className="grid gap-4">
-                      <div>
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Quem é o Devedor?</label>
-                        <input required type="text" className="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold" placeholder="Nome completo" value={formData.borrower} onChange={e => setFormData({...formData, borrower: e.target.value})} />
-                      </div>
-                      <div className="grid grid-cols-2 gap-4">
-                        <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Capital (R$)</label>
-                          <input required type="number" step="0.01" className="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold" placeholder="0,00" value={formData.principal} onChange={e => setFormData({...formData, principal: e.target.value})} />
-                        </div>
-                        <div>
-                          <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Tempo (Meses)</label>
-                          <input required type="number" className="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold" value={formData.months} onChange={e => setFormData({...formData, months: e.target.value})} />
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-slate-900 rounded-3xl p-6 text-white space-y-4">
-                      <div className="flex items-center justify-between">
-                        <span className="text-[10px] font-black text-indigo-400 uppercase">Configuração de Juros</span>
-                        <div className="flex bg-slate-800 p-1 rounded-lg text-[9px] font-black">
-                          <button type="button" onClick={() => setFormData({...formData, interestType: 'compound'})} className={`px-2 py-1 rounded ${formData.interestType === 'compound' ? 'bg-indigo-600' : 'text-slate-500'}`}>COMPOSTO</button>
-                          <button type="button" onClick={() => setFormData({...formData, interestType: 'simple'})} className={`px-2 py-1 rounded ${formData.interestType === 'simple' ? 'bg-indigo-600' : 'text-slate-500'}`}>SIMPLES</button>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-4">
-                        <div className="flex-1">
-                          <label className="text-[9px] text-slate-400 font-bold uppercase">Taxa Mensal (%)</label>
-                          <input required type="number" step="0.1" className="w-full bg-transparent border-b-2 border-slate-700 p-2 text-xl font-black focus:border-indigo-500 outline-none" value={formData.interestRate} onChange={e => setFormData({...formData, interestRate: e.target.value})} />
-                        </div>
-                        <div className="flex-1 text-right">
-                          <p className="text-[9px] text-slate-400 font-bold uppercase">Montante Final Calculado</p>
-                          <p className="text-xl font-black text-indigo-400">R$ {simulation.totalWithInterest.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <button 
-                      type="button" 
-                      disabled={!formData.borrower || !formData.principal || !formData.interestRate}
-                      onClick={() => setStep(2)}
-                      className="w-full bg-slate-800 hover:bg-slate-950 text-white py-5 rounded-2xl font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 disabled:opacity-50"
-                    >
-                      Continuar para Parcelas <ArrowRight size={18}/>
-                    </button>
-                  </div>
-                ) : (
-                  <div className="space-y-6 animate-in slide-in-from-right-4 duration-300">
-                    <div className="bg-indigo-50 p-6 rounded-3xl border border-indigo-100">
-                      <div className="flex justify-between items-center mb-4">
-                        <span className="text-[10px] font-black text-indigo-400 uppercase">Resumo da Dívida</span>
-                        <span className="text-xs font-bold text-slate-600">{formData.borrower}</span>
-                      </div>
-                      <div className="flex justify-between items-end">
-                        <div>
-                          <p className="text-[10px] font-bold text-slate-400 uppercase">Valor Total</p>
-                          <p className="text-2xl font-black text-indigo-700">R$ {simulation.totalWithInterest.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-[10px] font-bold text-slate-400 uppercase">Juros Totais</p>
-                          <p className="text-sm font-black text-emerald-600">+ R$ {simulation.interestAmount.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</p>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                      <div>
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Dividir em</label>
-                        <select className="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none outline-none font-bold" value={formData.installments} onChange={e => setFormData({...formData, installments: e.target.value})}>
-                          {[1,2,3,4,5,6,10,12,18,24,36,48].map(n => <option key={n} value={n}>{n} Parcelas</option>)}
-                        </select>
-                      </div>
-                      <div>
-                        <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">1º Vencimento</label>
-                        <input required type="date" className="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none outline-none font-bold" value={formData.firstDueDate} onChange={e => setFormData({...formData, firstDueDate: e.target.value})} />
-                      </div>
-                    </div>
-
-                    <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 flex justify-between items-center">
-                      <span className="text-xs font-bold text-emerald-700">Valor de cada Parcela</span>
-                      <span className="text-lg font-black text-emerald-700">R$ {simulation.installmentValue.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</span>
-                    </div>
-
-                    <div className="flex gap-3">
-                      <button type="button" onClick={() => setStep(1)} className="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-600 py-4 rounded-2xl font-bold transition-all">Voltar</button>
-                      <button type="submit" className="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white py-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-indigo-100 transition-all">Finalizar e Salvar</button>
-                    </div>
-                  </div>
-                )}
-              </form>
             </div>
-          </div>
-        )}
 
-      </div>
+            <!-- Dashboard Stats -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase mb-1">Total Ativo</p>
+                    <p id="total-active" class="text-xl font-black text-slate-800">R$ 0,00</p>
+                </div>
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase mb-1">Total Recebido</p>
+                    <p id="total-received" class="text-xl font-black text-emerald-600">R$ 0,00</p>
+                </div>
+                <div class="bg-white p-5 rounded-2xl border border-slate-100 shadow-sm">
+                    <p class="text-xs font-bold text-slate-400 uppercase mb-1">Empréstimos</p>
+                    <p id="total-loans" class="text-xl font-black text-indigo-600">0</p>
+                </div>
+            </div>
+
+            <!-- Loan List -->
+            <div id="loan-list" class="space-y-4">
+                <div class="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
+                    <i data-lucide="loader-2" class="mx-auto text-indigo-500 animate-spin mb-4" size="48"></i>
+                    <p class="text-slate-500 font-medium">Carregando dados...</p>
+                </div>
+            </div>
+        </div>
     </div>
-  );
-};
 
-export default App;
+    <!-- Modal Multi-Passo -->
+    <div id="modal" class="fixed inset-0 bg-slate-900/60 backdrop-blur-sm z-50 hidden items-center justify-center p-4">
+        <div class="bg-white rounded-[2.5rem] w-full max-w-lg shadow-2xl overflow-hidden border border-white/20 modal-animate">
+            
+            <div class="p-6 bg-indigo-600 text-white flex justify-between items-center">
+                <div class="flex items-center gap-3">
+                    <div class="bg-white/20 p-2 rounded-xl">
+                        <i data-lucide="calculator" class="w-5 h-5"></i>
+                    </div>
+                    <div>
+                        <h2 class="font-bold leading-none">Novo Empréstimo</h2>
+                        <p id="step-indicator" class="text-[10px] font-bold opacity-70 uppercase tracking-widest mt-1">Passo 1 de 2</p>
+                    </div>
+                </div>
+                <button onclick="window.closeModal()" class="bg-black/10 p-2 rounded-full hover:bg-black/20 transition-colors">
+                    <i data-lucide="x" class="w-5 h-5"></i>
+                </button>
+            </div>
+
+            <div class="p-8 space-y-6">
+                <!-- Passo 1 -->
+                <div id="step-1" class="space-y-5">
+                    <div class="grid gap-4">
+                        <div>
+                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Quem é o Devedor?</label>
+                            <input id="borrower" type="text" class="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold" placeholder="Nome completo">
+                        </div>
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Capital (R$)</label>
+                                <input id="principal" type="number" step="0.01" class="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold" placeholder="0,00">
+                            </div>
+                            <div>
+                                <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Tempo (Meses)</label>
+                                <input id="months" type="number" class="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none focus:ring-2 focus:ring-indigo-500 outline-none font-bold" value="1">
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="bg-slate-900 rounded-3xl p-6 text-white space-y-4">
+                        <div class="flex items-center justify-between">
+                            <span class="text-[10px] font-black text-indigo-400 uppercase">Configuração de Juros</span>
+                            <div class="flex bg-slate-800 p-1 rounded-lg text-[9px] font-black">
+                                <button type="button" onclick="window.setInterestType('compound')" id="btn-compound" class="px-2 py-1 rounded bg-indigo-600">COMPOSTO</button>
+                                <button type="button" onclick="window.setInterestType('simple')" id="btn-simple" class="px-2 py-1 rounded text-slate-500">SIMPLES</button>
+                            </div>
+                        </div>
+                        <div class="flex items-center gap-4">
+                            <div class="flex-1">
+                                <label class="text-[9px] text-slate-400 font-bold uppercase">Taxa Mensal (%)</label>
+                                <input id="interest-rate" type="number" step="0.1" class="w-full bg-transparent border-b-2 border-slate-700 p-2 text-xl font-black focus:border-indigo-500 outline-none" value="5">
+                            </div>
+                            <div class="flex-1 text-right">
+                                <p class="text-[9px] text-slate-400 font-bold uppercase">Montante Final</p>
+                                <p id="calc-result" class="text-xl font-black text-indigo-400">R$ 0,00</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <button onclick="window.goToStep(2)" class="w-full bg-slate-800 hover:bg-slate-950 text-white py-5 rounded-2xl font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2">
+                        Continuar para Parcelas <i data-lucide="arrow-right" class="w-5 h-5"></i>
+                    </button>
+                </div>
+
+                <!-- Passo 2 -->
+                <div id="step-2" class="space-y-6 hidden">
+                    <div class="bg-indigo-50 p-6 rounded-3xl border border-indigo-100">
+                        <div class="flex justify-between items-center mb-4">
+                            <span class="text-[10px] font-black text-indigo-400 uppercase">Resumo da Dívida</span>
+                            <span id="summary-borrower" class="text-xs font-bold text-slate-600">--</span>
+                        </div>
+                        <div class="flex justify-between items-end">
+                            <div>
+                                <p class="text-[10px] font-bold text-slate-400 uppercase">Valor Total</p>
+                                <p id="summary-total" class="text-2xl font-black text-indigo-700">R$ 0,00</p>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-[10px] font-bold text-slate-400 uppercase">Juros Totais</p>
+                                <p id="summary-interest" class="text-sm font-black text-emerald-600">+ R$ 0,00</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">Dividir em</label>
+                            <select id="installments" class="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none outline-none font-bold">
+                                <option value="1">1 Parcela</option>
+                                <option value="2">2 Parcelas</option>
+                                <option value="3">3 Parcelas</option>
+                                <option value="6">6 Parcelas</option>
+                                <option value="10">10 Parcelas</option>
+                                <option value="12">12 Parcelas</option>
+                                <option value="24">24 Parcelas</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label class="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-1">1º Vencimento</label>
+                            <input id="first-due-date" type="date" class="w-full mt-1 p-4 rounded-2xl bg-slate-50 border-none outline-none font-bold">
+                        </div>
+                    </div>
+
+                    <div class="p-4 rounded-2xl bg-emerald-50 border border-emerald-100 flex justify-between items-center">
+                        <span class="text-xs font-bold text-emerald-700">Valor da Parcela</span>
+                        <span id="installment-value" class="text-lg font-black text-emerald-700">R$ 0,00</span>
+                    </div>
+
+                    <div class="flex gap-3">
+                        <button onclick="window.goToStep(1)" class="flex-1 bg-slate-100 hover:bg-slate-200 text-slate-600 py-4 rounded-2xl font-bold transition-all">Voltar</button>
+                        <button onclick="window.saveLoan()" class="flex-[2] bg-indigo-600 hover:bg-indigo-700 text-white py-4 rounded-2xl font-black uppercase tracking-widest shadow-xl shadow-indigo-100 transition-all">Salvar Empréstimo</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Configurações Globais
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'loan-manager-calculator';
+        
+        let currentUser = null;
+        let interestType = 'compound';
+        let currentSimulation = { total: 0, interest: 0, installment: 0 };
+
+        // Inicialização Auth
+        async function initAuth() {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (e) { console.error("Auth error:", e); }
+        }
+
+        onAuthStateChanged(auth, (user) => {
+            currentUser = user;
+            if (user) loadLoans();
+        });
+
+        // Lógica de Simulação
+        function updateSimulation() {
+            const p = parseFloat(document.getElementById('principal').value) || 0;
+            const r = (parseFloat(document.getElementById('interest-rate').value) || 0) / 100;
+            const t = parseFloat(document.getElementById('months').value) || 1;
+            const n = parseInt(document.getElementById('installments').value) || 1;
+
+            let total = 0;
+            if (interestType === 'simple') {
+                total = p * (1 + r * t);
+            } else {
+                total = p * Math.pow(1 + r, t);
+            }
+
+            currentSimulation = {
+                total,
+                interest: total - p,
+                installment: total / n
+            };
+
+            document.getElementById('calc-result').innerText = total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            document.getElementById('summary-total').innerText = total.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            document.getElementById('summary-interest').innerText = `+ ${currentSimulation.interest.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' })}`;
+            document.getElementById('installment-value').innerText = currentSimulation.installment.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            document.getElementById('summary-borrower').innerText = document.getElementById('borrower').value || '--';
+        }
+
+        // --- Exportando funções para o Escopo Global (Window) ---
+        window.saveLoan = async () => {
+            if (!currentUser) return;
+            
+            const borrower = document.getElementById('borrower').value;
+            const firstDateStr = document.getElementById('first-due-date').value;
+            const numInstallments = parseInt(document.getElementById('installments').value);
+            
+            if (!borrower || !firstDateStr || !document.getElementById('principal').value) {
+                alert("Preencha todos os campos obrigatórios!");
+                return;
+            }
+
+            const installmentsList = [];
+            for (let i = 0; i < numInstallments; i++) {
+                const date = new Date(firstDateStr);
+                date.setMonth(date.getMonth() + i);
+                installmentsList.push({
+                    number: i + 1,
+                    dueDate: date.toISOString(),
+                    amount: currentSimulation.installment,
+                    paid: false,
+                    paymentDate: null
+                });
+            }
+
+            try {
+                const loansCol = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
+                await addDoc(loansCol, {
+                    borrower,
+                    principal: parseFloat(document.getElementById('principal').value),
+                    totalToPay: currentSimulation.total,
+                    interestRate: document.getElementById('interest-rate').value,
+                    interestType,
+                    installmentsList,
+                    createdAt: new Date().toISOString()
+                });
+                window.closeModal();
+            } catch (e) { console.error("Save error:", e); }
+        };
+
+        window.toggleExpand = (id) => {
+            const el = document.getElementById(`details-${id}`);
+            const icon = document.getElementById(`icon-${id}`);
+            if (!el) return;
+            el.classList.toggle('hidden');
+            if (icon) icon.style.transform = el.classList.contains('hidden') ? 'rotate(0deg)' : 'rotate(180deg)';
+        };
+
+        window.markPaid = async (loanId, idx) => {
+            if (!currentUser) return;
+            const loanRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', loanId);
+            
+            try {
+                const docSnap = await getDoc(loanRef);
+                if (docSnap.exists()) {
+                    const data = docSnap.data();
+                    const newList = [...data.installmentsList];
+                    newList[idx].paid = !newList[idx].paid;
+                    newList[idx].paymentDate = newList[idx].paid ? new Date().toISOString() : null;
+                    await updateDoc(loanRef, { installmentsList: newList });
+                }
+            } catch (e) { console.error("Update error:", e); }
+        };
+
+        window.deleteLoan = async (id) => {
+            if (!currentUser || !confirm("Deseja excluir este empréstimo?")) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', id));
+            } catch (e) { console.error("Delete error:", e); }
+        };
+
+        window.setInterestType = (type) => {
+            interestType = type;
+            document.getElementById('btn-compound').className = `px-2 py-1 rounded ${type === 'compound' ? 'bg-indigo-600' : 'text-slate-500'}`;
+            document.getElementById('btn-simple').className = `px-2 py-1 rounded ${type === 'simple' ? 'bg-indigo-600' : 'text-slate-500'}`;
+            updateSimulation();
+        };
+
+        window.goToStep = (s) => {
+            document.getElementById('step-1').classList.toggle('hidden', s !== 1);
+            document.getElementById('step-2').classList.toggle('hidden', s !== 2);
+            document.getElementById('step-indicator').innerText = `Passo ${s} de 2`;
+            updateSimulation();
+        };
+
+        window.openModal = () => {
+            document.getElementById('modal').classList.remove('hidden');
+            document.getElementById('modal').classList.add('flex');
+            window.goToStep(1);
+        };
+
+        window.closeModal = () => {
+            document.getElementById('modal').classList.add('hidden');
+            document.getElementById('modal').classList.remove('flex');
+        };
+
+        function loadLoans() {
+            const loansCol = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
+            onSnapshot(loansCol, (snapshot) => {
+                const loans = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
+                renderDashboard(loans);
+            }, (error) => console.error("Snapshot error:", error));
+        }
+
+        function renderDashboard(loans) {
+            const listContainer = document.getElementById('loan-list');
+            let totalActive = 0;
+            let totalReceived = 0;
+
+            if (loans.length === 0) {
+                listContainer.innerHTML = `
+                    <div class="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
+                        <i data-lucide="calculator" class="mx-auto text-slate-200 mb-4" size="60"></i>
+                        <p class="text-slate-500 font-medium">Faça seu primeiro cálculo para começar.</p>
+                    </div>
+                `;
+            } else {
+                listContainer.innerHTML = '';
+                loans.forEach(loan => {
+                    const paidCount = loan.installmentsList.filter(i => i.paid).length;
+                    const isFullyPaid = paidCount === loan.installmentsList.length;
+                    
+                    loan.installmentsList.forEach(i => {
+                        if (i.paid) totalReceived += i.amount;
+                        else totalActive += i.amount;
+                    });
+
+                    const card = document.createElement('div');
+                    card.className = `bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden transition-all ${isFullyPaid ? 'opacity-70' : ''}`;
+                    card.innerHTML = `
+                        <div class="p-6 cursor-pointer hover:bg-slate-50/50 flex justify-between items-center" onclick="window.toggleExpand('${loan.id}')">
+                            <div>
+                                <div class="flex items-center gap-3 mb-1">
+                                    <h3 class="text-lg font-bold text-slate-800">${loan.borrower}</h3>
+                                    ${isFullyPaid ? '<span class="bg-emerald-100 text-emerald-700 text-[10px] font-black px-2 py-1 rounded">PAGO</span>' : ''}
+                                </div>
+                                <div class="flex gap-4 text-xs font-bold text-slate-400 uppercase tracking-tighter">
+                                    <span>Cap: R$ ${loan.principal.toLocaleString('pt-BR')}</span>
+                                    <span class="text-indigo-500">Total: R$ ${loan.totalToPay.toLocaleString('pt-BR')}</span>
+                                    <span>${loan.installmentsList.length}x</span>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-sm font-black text-slate-700">${paidCount}/${loan.installmentsList.length}</p>
+                                <i data-lucide="chevron-down" id="icon-${loan.id}" class="inline text-slate-400 w-4 h-4"></i>
+                            </div>
+                        </div>
+                        <div id="details-${loan.id}" class="hidden p-6 bg-slate-50/50 border-t border-slate-50">
+                            <div class="grid gap-2">
+                                ${loan.installmentsList.map((inst, idx) => `
+                                    <div class="flex items-center justify-between p-3 rounded-xl border ${inst.paid ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-200'}">
+                                        <div class="flex items-center gap-4">
+                                            <span class="text-[10px] font-black text-slate-400 w-4">${inst.number}</span>
+                                            <div>
+                                                <p class="text-sm font-bold">R$ ${inst.amount.toLocaleString('pt-BR', {minimumFractionDigits: 2})}</p>
+                                                <p class="text-[10px] font-bold text-slate-400">Venc: ${new Date(inst.dueDate).toLocaleDateString('pt-BR')}</p>
+                                            </div>
+                                        </div>
+                                        <button onclick="window.markPaid('${loan.id}', ${idx})" class="p-2 rounded-lg ${inst.paid ? 'text-emerald-600 bg-emerald-100' : 'text-slate-300 hover:text-indigo-600 transition-colors'}">
+                                            <i data-lucide="check-circle-2" class="w-5 h-5"></i>
+                                        </button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <div class="mt-4 pt-4 border-t border-slate-200 flex justify-end">
+                                <button onclick="window.deleteLoan('${loan.id}')" class="text-rose-500 text-xs font-bold flex items-center gap-1 hover:underline">
+                                    <i data-lucide="trash-2" class="w-4 h-4"></i> Excluir
+                                </button>
+                            </div>
+                        </div>
+                    `;
+                    listContainer.appendChild(card);
+                });
+            }
+
+            document.getElementById('total-active').innerText = totalActive.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            document.getElementById('total-received').innerText = totalReceived.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            document.getElementById('total-loans').innerText = loans.length;
+            lucide.createIcons();
+        }
+
+        // Listeners de Input
+        document.getElementById('principal').addEventListener('input', updateSimulation);
+        document.getElementById('interest-rate').addEventListener('input', updateSimulation);
+        document.getElementById('months').addEventListener('input', updateSimulation);
+        document.getElementById('installments').addEventListener('change', updateSimulation);
+        document.getElementById('borrower').addEventListener('input', updateSimulation);
+
+        initAuth();
+        lucide.createIcons();
+    </script>
+</body>
+</html>
