@@ -27,14 +27,11 @@
                     <h1 class="text-3xl font-black text-slate-800 tracking-tight">CrediManager <span class="text-indigo-600">Calc</span></h1>
                     <p class="text-slate-500 font-medium">Gestão de juros e parcelamento na nuvem</p>
                     <div class="flex items-center gap-2 mt-2">
-                        <span class="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-bold uppercase tracking-widest">Sua Chave de Acesso:</span>
-                        <code id="user-status" class="text-[10px] text-indigo-600 font-black cursor-pointer hover:underline" title="Clique para copiar">Carregando...</code>
+                        <span class="text-[10px] bg-slate-200 text-slate-600 px-2 py-0.5 rounded font-bold uppercase tracking-widest">Estado da Ligação:</span>
+                        <code id="user-status" class="text-[10px] text-indigo-600 font-black">A ligar...</code>
                     </div>
                 </div>
                 <div class="flex gap-2">
-                    <button onclick="window.promptRestore()" class="bg-white border border-slate-200 text-slate-600 px-4 py-3 rounded-2xl font-bold shadow-sm flex items-center gap-2 transition-all hover:bg-slate-50">
-                        <i data-lucide="refresh-cw" class="w-4 h-4"></i> Restaurar
-                    </button>
                     <button onclick="window.openModal()" class="bg-indigo-600 hover:bg-indigo-700 text-white px-6 py-3 rounded-2xl font-bold shadow-lg shadow-indigo-100 flex items-center gap-2 transition-all hover:-translate-y-1">
                         <i data-lucide="plus" class="w-5 h-5"></i> Novo Cálculo
                     </button>
@@ -59,6 +56,7 @@
 
             <!-- Lista de Empréstimos -->
             <div id="loan-list" class="space-y-4">
+                <!-- Skeleton Loading -->
                 <div class="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
                     <i data-lucide="loader-2" class="mx-auto text-indigo-500 animate-spin mb-4" size="48"></i>
                     <p class="text-slate-500 font-medium">Sincronizando com a nuvem...</p>
@@ -188,74 +186,144 @@
         import { getAuth, onAuthStateChanged, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
-        // Configurações Iniciais
+        // --- Configuração Inicial ---
         const firebaseConfig = JSON.parse(__firebase_config);
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'loan-manager-cloud';
-        
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'credi-manager-app';
+
         let currentUser = null;
         let interestType = 'compound';
         let currentSimulation = { total: 0, interest: 0, installment: 0 };
         let unsubscribeLoans = null;
 
-        // Gestão de Autenticação (Regra 3)
-        async function initAuth() {
+        // --- Autenticação (Regra 3) ---
+        const initAuth = async () => {
             try {
-                // Tenta recuperar token salvo para manter a mesma sessão
-                const savedToken = localStorage.getItem('credi_manager_token');
-                
                 if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
                     await signInWithCustomToken(auth, __initial_auth_token);
-                } else if (savedToken) {
-                    // Aqui simulamos uma restauração simples. No Firestore real usaríamos 
-                    // signInWithCustomToken se tivéssemos o token, mas aqui usamos o anonimato
-                    // O UID persistirá no navegador enquanto o IndexedDB/LocalStorage estiver ativo.
-                    await signInAnonymously(auth);
                 } else {
                     await signInAnonymously(auth);
                 }
-            } catch (e) { 
-                console.error("Erro na Autenticação:", e); 
+            } catch (error) {
+                console.error("Erro na autenticação:", error);
+                document.getElementById('user-status').innerText = "Erro de Ligação";
             }
-        }
+        };
 
         onAuthStateChanged(auth, (user) => {
             currentUser = user;
             if (user) {
-                document.getElementById('user-status').innerText = user.uid;
+                document.getElementById('user-status').innerText = "Ligado Cloud";
                 loadLoans();
             } else {
+                document.getElementById('user-status').innerText = "Desligado";
                 if (unsubscribeLoans) unsubscribeLoans();
             }
         });
 
-        // --- Funções Auxiliares ---
+        // --- Lógica de Negócio e Base de Dados ---
 
-        window.promptRestore = () => {
-            const code = prompt("Introduza a sua Chave de Acesso para restaurar os dados:");
-            if (code && code.length > 20) {
-                alert("Aviso: A restauração entre dispositivos via UID requer autenticação completa. No modo demonstração, a sua chave é o identificador único da sessão atual.");
+        // Carregar Empréstimos (Real-time)
+        function loadLoans() {
+            if (!currentUser) return;
+
+            // Caminho da Coleção (Regra 1)
+            const loansRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
+            
+            unsubscribeLoans = onSnapshot(loansRef, (snapshot) => {
+                const loans = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                // Ordenação em memória (Regra 2)
+                loans.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+                renderLoans(loans);
+            }, (error) => {
+                console.error("Erro ao carregar dados:", error);
+            });
+        }
+
+        // Guardar Novo Empréstimo
+        window.saveLoan = async () => {
+            if (!currentUser) return;
+
+            const borrower = document.getElementById('borrower').value;
+            const principal = parseFloat(document.getElementById('principal').value);
+            const months = parseInt(document.getElementById('months').value);
+            const rate = parseFloat(document.getElementById('interest-rate').value);
+            const numInst = parseInt(document.getElementById('installments').value);
+            const firstDate = document.getElementById('first-due-date').value;
+
+            if (!borrower || isNaN(principal) || !firstDate) return;
+
+            const saveBtn = document.getElementById('save-btn');
+            saveBtn.disabled = true;
+            saveBtn.innerText = "A guardar...";
+
+            // Gerar lista de parcelas
+            const installmentsList = [];
+            for (let i = 0; i < numInst; i++) {
+                const dueDate = new Date(firstDate);
+                dueDate.setMonth(dueDate.getMonth() + i);
+                installmentsList.push({
+                    number: i + 1,
+                    dueDate: dueDate.toISOString(),
+                    amount: currentSimulation.installment,
+                    paid: false
+                });
+            }
+
+            try {
+                const loansRef = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
+                await addDoc(loansRef, {
+                    borrower,
+                    principal,
+                    months,
+                    interestRate: rate,
+                    interestType,
+                    totalToPay: currentSimulation.total,
+                    installmentsList,
+                    createdAt: new Date().toISOString()
+                });
+                
+                window.closeModal();
+                resetForm();
+            } catch (error) {
+                console.error("Erro ao salvar:", error);
+            } finally {
+                saveBtn.disabled = false;
+                saveBtn.innerText = "Confirmar e Salvar";
             }
         };
 
-        document.getElementById('user-status').onclick = () => {
-            const el = document.getElementById('user-status');
-            const text = el.innerText;
-            const temp = document.createElement('input');
-            document.body.appendChild(temp);
-            temp.value = text;
-            temp.select();
-            document.execCommand('copy');
-            document.body.removeChild(temp);
+        // Alternar Estado de Pagamento
+        window.togglePaid = async (loanId, instIdx) => {
+            if (!currentUser) return;
+            const loanRef = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', loanId);
             
-            const original = text;
-            el.innerText = "COPIADO!";
-            setTimeout(() => el.innerText = original, 2000);
+            try {
+                const snap = await getDoc(loanRef);
+                if (snap.exists()) {
+                    const data = snap.data();
+                    const updatedList = [...data.installmentsList];
+                    updatedList[instIdx].paid = !updatedList[instIdx].paid;
+                    await updateDoc(loanRef, { installmentsList: updatedList });
+                }
+            } catch (error) {
+                console.error("Erro ao atualizar parcela:", error);
+            }
         };
 
-        // --- Lógica de Negócio ---
+        // Eliminar Empréstimo
+        window.deleteLoan = async (id) => {
+            if (!currentUser || !confirm("Tem a certeza que deseja eliminar este registo permanentemente?")) return;
+            try {
+                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', id));
+            } catch (error) {
+                console.error("Erro ao eliminar:", error);
+            }
+        };
+
+        // --- UI e Cálculos ---
 
         function updateSimulation() {
             const p = parseFloat(document.getElementById('principal').value) || 0;
@@ -263,10 +331,15 @@
             const t = parseFloat(document.getElementById('months').value) || 1;
             const n = parseInt(document.getElementById('installments').value) || 1;
 
-            let total = (interestType === 'simple') ? p * (1 + r * t) : p * Math.pow(1 + r, t);
+            let total = 0;
+            if (interestType === 'simple') {
+                total = p * (1 + (r * t));
+            } else {
+                total = p * Math.pow(1 + r, t);
+            }
 
             currentSimulation = {
-                total,
+                total: total,
                 interest: total - p,
                 installment: total / n
             };
@@ -279,71 +352,79 @@
             document.getElementById('summary-borrower').innerText = document.getElementById('borrower').value || '--';
         }
 
-        window.saveLoan = async () => {
-            if (!currentUser) return;
-            
-            const btn = document.getElementById('save-btn');
-            const borrower = document.getElementById('borrower').value;
-            const firstDate = document.getElementById('first-due-date').value;
-            const numInst = parseInt(document.getElementById('installments').value);
-            
-            if (!borrower || !firstDate || !document.getElementById('principal').value) return;
+        function renderLoans(loans) {
+            const list = document.getElementById('loan-list');
+            let activeSum = 0;
+            let receivedSum = 0;
 
-            btn.disabled = true;
-            btn.innerText = "Sincronizando...";
+            if (loans.length === 0) {
+                list.innerHTML = `
+                    <div class="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
+                        <i data-lucide="calculator" class="mx-auto text-slate-200 mb-4" size="60"></i>
+                        <p class="text-slate-400 font-bold uppercase text-[10px] tracking-widest">Nenhum cálculo guardado</p>
+                    </div>`;
+            } else {
+                list.innerHTML = '';
+                loans.forEach(loan => {
+                    const paidCount = loan.installmentsList.filter(i => i.paid).length;
+                    const totalCount = loan.installmentsList.length;
+                    
+                    loan.installmentsList.forEach(i => {
+                        if (i.paid) receivedSum += i.amount;
+                        else activeSum += i.amount;
+                    });
 
-            const installmentsList = [];
-            for (let i = 0; i < numInst; i++) {
-                const date = new Date(firstDate);
-                date.setMonth(date.getMonth() + i);
-                installmentsList.push({
-                    number: i + 1,
-                    dueDate: date.toISOString(),
-                    amount: currentSimulation.installment,
-                    paid: false
+                    const card = document.createElement('div');
+                    card.className = `bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden transition-all ${paidCount === totalCount ? 'opacity-60' : ''}`;
+                    card.innerHTML = `
+                        <div class="p-6 cursor-pointer hover:bg-slate-50/50 flex justify-between items-center" onclick="window.toggleExpand('${loan.id}')">
+                            <div>
+                                <div class="flex items-center gap-2 mb-1">
+                                    <h3 class="text-lg font-black text-slate-800">${loan.borrower}</h3>
+                                    ${paidCount === totalCount ? '<span class="bg-emerald-100 text-emerald-700 text-[9px] font-black px-2 py-0.5 rounded">LIQUIDADO</span>' : ''}
+                                </div>
+                                <div class="flex gap-4 text-[10px] font-bold text-slate-400 uppercase tracking-tight">
+                                    <span>Principal: R$ ${loan.principal.toFixed(2)}</span>
+                                    <span class="text-indigo-600">Final: R$ ${loan.totalToPay.toFixed(2)}</span>
+                                    <span>${totalCount}x</span>
+                                </div>
+                            </div>
+                            <div class="text-right">
+                                <p class="text-xs font-black text-slate-600">${paidCount}/${totalCount}</p>
+                                <i data-lucide="chevron-down" id="icon-${loan.id}" class="inline text-slate-300 w-4 h-4 transition-transform"></i>
+                            </div>
+                        </div>
+                        <div id="details-${loan.id}" class="hidden p-6 bg-slate-50/50 border-t border-slate-100 space-y-2">
+                            ${loan.installmentsList.map((inst, idx) => `
+                                <div class="flex items-center justify-between p-3 rounded-xl border ${inst.paid ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-200 shadow-sm'}">
+                                    <div class="flex items-center gap-4">
+                                        <span class="text-[10px] font-black text-slate-300 w-4">${inst.number}</span>
+                                        <div>
+                                            <p class="text-sm font-bold">R$ ${inst.amount.toFixed(2)}</p>
+                                            <p class="text-[9px] font-bold text-slate-400 uppercase">${new Date(inst.dueDate).toLocaleDateString('pt-BR')}</p>
+                                        </div>
+                                    </div>
+                                    <button onclick="window.togglePaid('${loan.id}', ${idx})" class="p-2 rounded-lg transition-all ${inst.paid ? 'text-emerald-600 bg-white' : 'text-slate-200 hover:text-indigo-600'}">
+                                        <i data-lucide="check-circle-2" class="w-6 h-6"></i>
+                                    </button>
+                                </div>
+                            `).join('')}
+                            <div class="mt-4 pt-4 border-t border-slate-200 flex justify-end">
+                                <button onclick="window.deleteLoan('${loan.id}')" class="text-rose-500 text-[10px] font-black uppercase flex items-center gap-1 hover:text-rose-700">
+                                    <i data-lucide="trash-2" class="w-3 h-3"></i> Eliminar Registo
+                                </button>
+                            </div>
+                        </div>`;
+                    list.appendChild(card);
                 });
             }
 
-            try {
-                const path = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
-                await addDoc(path, {
-                    borrower,
-                    principal: parseFloat(document.getElementById('principal').value),
-                    totalToPay: currentSimulation.total,
-                    interestRate: document.getElementById('interest-rate').value,
-                    interestType,
-                    installmentsList,
-                    createdAt: new Date().toISOString()
-                });
-                window.closeModal();
-            } catch (e) {
-                console.error("Erro ao salvar:", e);
-            } finally {
-                btn.disabled = false;
-                btn.innerText = "Confirmar e Salvar";
-            }
-        };
-
-        window.markPaid = async (loanId, idx) => {
-            if (!currentUser) return;
-            const ref = doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', loanId);
-            try {
-                const snap = await getDoc(ref);
-                if (snap.exists()) {
-                    const data = snap.data();
-                    const list = [...data.installmentsList];
-                    list[idx].paid = !list[idx].paid;
-                    await updateDoc(ref, { installmentsList: list });
-                }
-            } catch (e) { console.error("Erro de atualização:", e); }
-        };
-
-        window.deleteLoan = async (id) => {
-            if (!currentUser || !confirm("Deseja apagar este registro permanentemente da nuvem?")) return;
-            try {
-                await deleteDoc(doc(db, 'artifacts', appId, 'users', currentUser.uid, 'loans', id));
-            } catch (e) { console.error("Erro ao eliminar:", e); }
-        };
+            const fmt = (v) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
+            document.getElementById('total-active').innerText = fmt(activeSum);
+            document.getElementById('total-received').innerText = fmt(receivedSum);
+            document.getElementById('total-loans').innerText = loans.length;
+            lucide.createIcons();
+        }
 
         window.toggleExpand = (id) => {
             const el = document.getElementById(`details-${id}`);
@@ -377,93 +458,23 @@
             document.getElementById('modal').classList.remove('flex');
         };
 
-        function loadLoans() {
-            if (!currentUser) return;
-            const path = collection(db, 'artifacts', appId, 'users', currentUser.uid, 'loans');
-            unsubscribeLoans = onSnapshot(path, (snap) => {
-                const data = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-                data.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-                render(data);
-            }, (err) => console.error("Erro no Snapshot:", err));
+        function resetForm() {
+            document.getElementById('borrower').value = '';
+            document.getElementById('principal').value = '';
+            document.getElementById('months').value = '1';
+            document.getElementById('interest-rate').value = '5';
+            document.getElementById('first-due-date').value = '';
+            updateSimulation();
         }
 
-        function render(loans) {
-            const list = document.getElementById('loan-list');
-            let active = 0, received = 0;
-
-            if (loans.length === 0) {
-                list.innerHTML = `
-                    <div class="bg-white rounded-3xl p-12 text-center border-2 border-dashed border-slate-200">
-                        <i data-lucide="cloud-off" class="mx-auto text-slate-200 mb-4" size="60"></i>
-                        <p class="text-slate-400 font-bold uppercase text-[10px] tracking-widest">Sem dados na nuvem</p>
-                    </div>`;
-            } else {
-                list.innerHTML = '';
-                loans.forEach(loan => {
-                    const paid = loan.installmentsList.filter(i => i.paid).length;
-                    const total = loan.installmentsList.length;
-                    
-                    loan.installmentsList.forEach(i => i.paid ? (received += i.amount) : (active += i.amount));
-
-                    const card = document.createElement('div');
-                    card.className = `bg-white rounded-2xl shadow-sm border border-slate-100 overflow-hidden transition-all ${paid === total ? 'opacity-60' : ''}`;
-                    card.innerHTML = `
-                        <div class="p-6 cursor-pointer hover:bg-slate-50/50 flex justify-between items-center" onclick="window.toggleExpand('${loan.id}')">
-                            <div>
-                                <div class="flex items-center gap-2 mb-1">
-                                    <h3 class="text-lg font-black text-slate-800">${loan.borrower}</h3>
-                                    ${paid === total ? '<span class="bg-emerald-100 text-emerald-700 text-[9px] font-black px-2 py-0.5 rounded">PAGO</span>' : ''}
-                                </div>
-                                <div class="flex gap-4 text-[10px] font-bold text-slate-400 uppercase tracking-tight">
-                                    <span>Base: R$ ${loan.principal.toFixed(2)}</span>
-                                    <span class="text-indigo-600">Total: R$ ${loan.totalToPay.toFixed(2)}</span>
-                                    <span>${total}x</span>
-                                </div>
-                            </div>
-                            <div class="text-right">
-                                <p class="text-xs font-black text-slate-600">${paid}/${total}</p>
-                                <i data-lucide="chevron-down" id="icon-${loan.id}" class="inline text-slate-300 w-4 h-4 transition-transform"></i>
-                            </div>
-                        </div>
-                        <div id="details-${loan.id}" class="hidden p-6 bg-slate-50/50 border-t border-slate-100 space-y-2">
-                            ${loan.installmentsList.map((inst, idx) => `
-                                <div class="flex items-center justify-between p-3 rounded-xl border ${inst.paid ? 'bg-emerald-50 border-emerald-100' : 'bg-white border-slate-200 shadow-sm'}">
-                                    <div class="flex items-center gap-4">
-                                        <span class="text-[10px] font-black text-slate-300 w-4">${inst.number}</span>
-                                        <div>
-                                            <p class="text-sm font-bold">R$ ${inst.amount.toFixed(2)}</p>
-                                            <p class="text-[9px] font-bold text-slate-400 uppercase">${new Date(inst.dueDate).toLocaleDateString('pt-BR')}</p>
-                                        </div>
-                                    </div>
-                                    <button onclick="window.markPaid('${loan.id}', ${idx})" class="p-2 rounded-lg transition-all ${inst.paid ? 'text-emerald-600 bg-white' : 'text-slate-200 hover:text-indigo-600'}">
-                                        <i data-lucide="check-circle-2" class="w-6 h-6"></i>
-                                    </button>
-                                </div>
-                            `).join('')}
-                            <div class="mt-4 pt-4 border-t border-slate-200 flex justify-end">
-                                <button onclick="window.deleteLoan('${loan.id}')" class="text-rose-500 text-[10px] font-black uppercase flex items-center gap-1 hover:text-rose-700">
-                                    <i data-lucide="trash-2" class="w-3 h-3"></i> Apagar Registro
-                                </button>
-                            </div>
-                        </div>`;
-                    list.appendChild(card);
-                });
-            }
-
-            const fmt = (v) => v.toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
-            document.getElementById('total-active').innerText = fmt(active);
-            document.getElementById('total-received').innerText = fmt(received);
-            document.getElementById('total-loans').innerText = loans.length;
-            lucide.createIcons();
-        }
-
-        // Event Listeners
+        // Listeners
         document.getElementById('principal').addEventListener('input', updateSimulation);
         document.getElementById('interest-rate').addEventListener('input', updateSimulation);
         document.getElementById('months').addEventListener('input', updateSimulation);
         document.getElementById('installments').addEventListener('change', updateSimulation);
         document.getElementById('borrower').addEventListener('input', updateSimulation);
 
+        // Iniciar App
         initAuth();
         lucide.createIcons();
     </script>
